@@ -1,4 +1,4 @@
-# 🎫 AI-Driven Customer Support Ticket Classification and Routing System
+# 🎫 SupportBridge: AI-Driven Customer Support Ticket Classification and Routing System
 
 ## Overview
 

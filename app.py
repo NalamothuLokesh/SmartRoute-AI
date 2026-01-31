@@ -1,5 +1,5 @@
 """
-Customer Support Ticket Routing System - COMPREHENSIVE UI
+SupportBridge - COMPREHENSIVE UI
 AI-Powered Classification, Validation & Intelligent Routing
 """
 
@@ -23,7 +23,7 @@ from utils.routing import calculate_sla
 # ============================================================================
 
 st.set_page_config(
-    page_title="Ticket Routing System",
+    page_title="SupportBridge",
     page_icon="🎫",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -175,8 +175,16 @@ st.markdown(f"""
     }}
     
     /* Global Text Fixes */
-    h1, h2, h3, h4, h5, h6, p, li {{ color: {TEXT_MAIN} !important; }}
+    h1, h2, h3, h4, h5, h6, p {{ color: {TEXT_MAIN} !important; }}
     .stMarkdown {{ color: {TEXT_MAIN}; }}
+    
+    /* Fix for 3-dot menu dropdown */
+    ul[data-testid="main-menu-list"] {{
+        background-color: {CARD_BG} !important;
+    }}
+    ul[data-testid="main-menu-list"] li span {{
+        color: {TEXT_MAIN} !important;
+    }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -344,7 +352,7 @@ with st.sidebar:
     <div style="background: linear-gradient(135deg, {ELECTRIC_BLUE} 0%, {TEAL} 100%); 
                 padding: 15px; border-radius: 8px; margin-bottom: 20px;">
         <h3 style="color: white; margin: 0;">Navigation</h3>
-        <p style="color: rgba(255,255,255,0.8); margin: 5px 0 0 0; font-size: 0.9em;">SmartRoute AI</p>
+        <p style="color: rgba(255,255,255,0.8); margin: 5px 0 0 0; font-size: 0.9em;">SupportBridge</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -439,7 +447,7 @@ if os.path.exists("assets/logo.png"):
 st.markdown(f"""
 <div class="header-container">
     {header_logo}
-    <h1 class="header-title">SmartRoute AI</h1>
+    <h1 class="header-title">SupportBridge</h1>
     <p class="header-subtitle">AI-Powered Classification & Intelligent Routing | Checkpoint 6 Production Ready</p>
     <div style="clear: both;"></div>
 </div>
@@ -1483,7 +1491,7 @@ elif st.session_state.page == "Class Report":
 # ============================================================================
 
 elif st.session_state.page == "About":
-    st.markdown("## About Ticket Routing System")
+    st.markdown("## About SupportBridge")
     
     st.markdown(f"""
     <div class="summary-section">
