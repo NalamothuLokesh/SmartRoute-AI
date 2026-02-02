@@ -11,6 +11,8 @@ from datetime import datetime
 import io
 import sys
 import numpy as np
+import uuid
+import hashlib
 
 # Add utils to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -225,21 +227,110 @@ if "ticket_counter" not in st.session_state:
 # UTILITY FUNCTIONS
 # ============================================================================
 
-def load_history():
-    """Load ticket history."""
-    if os.path.exists("history.csv"):
-        try:
-            return pd.read_csv("history.csv")
-        except:
-            return pd.DataFrame()
-    return pd.DataFrame()
+def get_session_id():
+    """Get or create a persistent session ID for the browser."""
+    if "session_id" not in st.session_state:
+        # Generate a unique ID for this browser session
+        st.session_state.session_id = str(uuid.uuid4())[:8]
+    return st.session_state.session_id
 
-def save_ticket(ticket_data):
-    """Save ticket to history."""
-    history = load_history()
+def get_db_connection():
+    """
+    Check if GSheets connection is available in secrets.
+    To enable Google Sheets persistence:
+    1. Go to your Streamlit app's settings (top right menu -> "Settings" -> "Secrets").
+    2. Add a secret named `connections.gsheets` with your Google Service Account credentials.
+       Example format:
+       [connections.gsheets]
+       type = "streamlit_gsheets.GSheetsConnection"
+       spreadsheet = "YOUR_SPREADSHEET_URL_OR_ID"
+       worksheet = "YOUR_WORKSHEET_NAME"
+       # Add your service account credentials here (e.g., private_key, client_email, etc.)
+       # Or, if using a public sheet, you might only need spreadsheet/worksheet.
+       # For private sheets, ensure your service account has edit access.
+    """
+    try:
+        # Check if 'connections' section exists in secrets
+        if "connections" in st.secrets and "gsheets" in st.secrets.connections:
+            return st.connection("gsheets", type=GSheetsConnection)
+        return None
+    except Exception:
+        return None
+
+def load_history(user_id=None):
+    """Load ticket history from Google Sheets or local CSV."""
+    df = pd.DataFrame()
+    conn = get_db_connection()
+    
+    # Try loading from Google Sheets
+    if conn:
+        try:
+            df = conn.read(ttl="0") # No cache for realtime updates
+        except Exception as e:
+            # If sheet is empty or error, fall back to empty DF but don't crash
+            # st.warning(f"Could not read from Google Sheet: {e}")
+            df = pd.DataFrame()
+    
+    # Fallback to local CSV if GSheets failed or not configured
+    elif os.path.exists("history.csv"):
+        try:
+            df = pd.read_csv("history.csv")
+        except:
+            df = pd.DataFrame()
+            
+    # Normalize columns
+    if not df.empty:
+        # Create user_id column if it doesn't exist (migration)
+        if "user_id" not in df.columns:
+            df["user_id"] = "default"
+        
+        # Filter by user
+        if user_id:
+            return df[df["user_id"] == user_id]
+            
+    return df
+
+def save_ticket(ticket_data, user_id="default"):
+    """Save ticket to history with Cloud Persistence."""
+    # Prepare new row
     ticket_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    history = pd.concat([history, pd.DataFrame([ticket_data])], ignore_index=True)
-    history.to_csv("history.csv", index=False)
+    ticket_data["user_id"] = user_id
+    new_row = pd.DataFrame([ticket_data])
+    
+    conn = get_db_connection()
+    
+    if conn:
+        try:
+            # 1. Read existing
+            try:
+                existing_df = conn.read(ttl="0")
+                if existing_df.empty:
+                     updated_df = new_row
+                else:
+                     updated_df = pd.concat([existing_df, new_row], ignore_index=True)
+            except:
+                updated_df = new_row
+                
+            # 2. Write back
+            conn.update(data=updated_df)
+            return True
+        except Exception as e:
+            st.error(f"Failed to save to Cloud Database: {e}. Falling back to local storage.")
+            # Fall through to local save
+            
+    # Local File Fallback
+    history_file = "history.csv"
+    if os.path.exists(history_file):
+        try:
+            history = pd.read_csv(history_file)
+        except:
+            history = pd.DataFrame()
+    else:
+        history = pd.DataFrame()
+        
+    history = pd.concat([history, new_row], ignore_index=True)
+    history.to_csv(history_file, index=False)
+    return True
 
 def classify_ticket(subject, description):
     """Classify using ML models."""
@@ -309,9 +400,9 @@ def get_model_metrics():
         "pri_report": {}
     }
 
-def get_stats():
-    """Get comprehensive statistics."""
-    history = load_history()
+def get_stats(user_id="default"):
+    """Get comprehensive statistics for a specific user."""
+    history = load_history(user_id)
     if history.empty:
         return {"total": 0, "categories": {}, "priorities": {}, "avg_conf": 0, "by_agent": {}}
     
@@ -323,9 +414,9 @@ def get_stats():
         "by_agent": history["assigned_agent"].value_counts().to_dict() if "assigned_agent" in history.columns else {}
     }
 
-def get_analytics():
-    """Get detailed analytics."""
-    history = load_history()
+def get_analytics(user_id="default"):
+    """Get detailed analytics for a specific user."""
+    history = load_history(user_id)
     if history.empty:
         return None
     
@@ -356,6 +447,17 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
     
+    # Session / User Management
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = get_session_id()
+    
+    with st.expander("👤 User Session (Device Sync)", expanded=True):
+        current_user = st.text_input("Device/User ID", value=st.session_state.user_id, help="Use the same ID across devices to access your specific data.")
+        st.session_state.user_id = current_user
+        
+        if st.checkbox("Show Integration Info"):
+             st.info("ℹ️ **Note on Cloud Persistence:**\nTo prevent data reset on redeploy, you must connect a Google Sheet or Cloud Database. Local files (csv) are temporary on cloud servers.")
+    
     # Navigation buttons
     col1, col2 = st.columns(2)
     with col1:
@@ -383,7 +485,7 @@ with st.sidebar:
             st.session_state.page = "History"
             st.rerun()
     with col2:
-        if st.button("� Admin KPIs", use_container_width=True):
+        if st.button(" Admin KPIs", use_container_width=True):
             st.session_state.page = "Admin KPIs"
             st.rerun()
     
@@ -399,7 +501,8 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### Quick Stats")
-    stats = get_stats()
+    # Pass current user to stats
+    stats = get_stats(current_user)
     
     col1, col2 = st.columns(2)
     with col1:
@@ -458,13 +561,13 @@ st.markdown(f"""
 # ============================================================================
 
 if st.session_state.page == "Dashboard":
-    st.markdown("## Dashboard Overview")
+    st.markdown(f"## Dashboard Overview (User: {st.session_state.user_id})")
     
-    history = load_history()
-    stats = get_stats()
+    history = load_history(st.session_state.user_id)
+    stats = get_stats(st.session_state.user_id)
     
     if history.empty:
-        st.info("No tickets processed yet. Create a ticket to get started.")
+        st.info("No tickets processed yet for this user. Create a ticket to get started.")
     else:
         # Key Metrics
         col1, col2, col3, col4 = st.columns(4)
@@ -503,14 +606,14 @@ if st.session_state.page == "Dashboard":
 # ============================================================================
 
 elif st.session_state.page == "Analysis":
-    st.markdown("## Data Analysis & Insights")
+    st.markdown(f"## Data Analysis & Insights (User: {st.session_state.user_id})")
     
-    history = load_history()
+    history = load_history(st.session_state.user_id)
     
     if history.empty:
         st.info("No data to analyze yet.")
     else:
-        analytics = get_analytics()
+        analytics = get_analytics(st.session_state.user_id)
         
         # Summary Cards
         st.markdown("### Key Metrics")
@@ -671,11 +774,11 @@ elif st.session_state.page == "New Ticket":
         if not ticket_id or not ticket_id.strip():
             st.error("❌ Ticket ID is required. Please provide a unique ticket ID (e.g., TKT-001, PAY-789)")
         else:
-            # Check uniqueness
-            history = load_history()
+            # Check uniqueness within user scope
+            history = load_history(st.session_state.user_id)
             if not history.empty and "ticket_id" in history.columns:
                 if ticket_id.strip() in history["ticket_id"].values:
-                    st.error(f"❌ Ticket ID '{ticket_id}' already exists. Please use a unique Ticket ID.")
+                    st.error(f"❌ Ticket ID '{ticket_id}' already exists in your history. Please use a unique Ticket ID.")
                 else:
                     result = validate_ticket_input(subject, description, ticket_id)
                     
@@ -702,7 +805,7 @@ elif st.session_state.page == "New Ticket":
                                     "sla_hours": sla
                                 }
                                 
-                                save_ticket(ticket_data)
+                                save_ticket(ticket_data, st.session_state.user_id)
                                 
                                 st.success("✅ Ticket Created Successfully!")
                                 st.success("The model predicts both category and urgency and routes the ticket automatically, eliminating manual triage.")
@@ -812,10 +915,31 @@ elif st.session_state.page == "Bulk Upload":
     
     if file:
         df = pd.read_csv(file)
+        # Normalize columns: lower, strip
         df.columns = df.columns.str.lower().str.strip()
+        
+        # Smart Column Mapping
+        column_aliases = {
+            "ticket_id": ["ticket_id", "id", "ticketid", "ticket number", "ref_no", "ticket"],
+            "subject": ["subject", "title", "issue", "summary", "description_short", "issue title"],
+            "description": ["description", "details", "desc", "body", "issue_details", "full description"]
+        }
+        
+        # Try to map columns
+        rename_map = {}
+        for target, aliases in column_aliases.items():
+            for alias in aliases:
+                if alias in df.columns:
+                    rename_map[alias] = target
+                    break
+        
+        if rename_map:
+            df = df.rename(columns=rename_map)
+            st.info(f"Mapped columns: {rename_map}")
         
         if "ticket_id" not in df.columns or "subject" not in df.columns:
             st.error(f"CSV must have 'ticket_id' and 'subject' columns. Found: {list(df.columns)}")
+            st.warning("Supported aliases for ID: id, ticketid, ref_no. For Subject: title, issue, summary.")
         else:
             st.markdown("### Preview")
             st.dataframe(df.head(10), use_container_width=True)
@@ -824,7 +948,7 @@ elif st.session_state.page == "Bulk Upload":
                 progress = st.progress(0)
                 status = st.empty()
                 results = []
-                history = load_history()
+                history = load_history(st.session_state.user_id) # User scoped history
                 
                 for idx, row in df.iterrows():
                     subject = str(row.get("subject", "")).strip()
@@ -853,7 +977,7 @@ elif st.session_state.page == "Bulk Upload":
                         # Ensure we compare strings to strings
                         history_ids = history["ticket_id"].astype(str).str.strip().values
                         if ticket_id in history_ids:
-                            error_data["error"] = "Ticket ID already exists in system"
+                            error_data["error"] = "Ticket ID already exists in your history"
                             results.append(error_data)
                             progress.progress((idx + 1) / len(df))
                             status.text(f"Processing: {idx + 1}/{len(df)}")
@@ -895,7 +1019,7 @@ elif st.session_state.page == "Bulk Upload":
                                 "status": "Success"
                             }
                             
-                            save_ticket(ticket)
+                            save_ticket(ticket, st.session_state.user_id)
                             results.append(ticket)
                         else:
                             error_data["error"] = "Classification failed"
@@ -1032,9 +1156,9 @@ elif st.session_state.page == "Bulk Upload":
 # ============================================================================
 
 elif st.session_state.page == "History":
-    st.markdown("## Ticket History & Search")
+    st.markdown(f"## Ticket History & Search (User: {st.session_state.user_id})")
     
-    history = load_history()
+    history = load_history(st.session_state.user_id)
     
     if history.empty:
         st.info("No tickets in history yet.")
@@ -1095,10 +1219,10 @@ elif st.session_state.page == "History":
 # ============================================================================
 
 elif st.session_state.page == "Admin KPIs":
-    st.markdown("## Admin KPIs & Model Performance")
+    st.markdown(f"## KPIs & Model Performance (User: {st.session_state.user_id})")
     
     metrics = get_model_metrics()
-    history = load_history()
+    history = load_history(st.session_state.user_id)
     
     # Model Performance Metrics
     st.markdown("### Model Performance Metrics")
@@ -1119,7 +1243,7 @@ elif st.session_state.page == "Admin KPIs":
     st.markdown("### System KPIs")
     col1, col2, col3, col4 = st.columns(4)
     
-    stats = get_stats()
+    stats = get_stats(st.session_state.user_id)
     
     with col1:
         st.metric("Total Tickets", stats['total'])
@@ -1214,7 +1338,7 @@ elif st.session_state.page == "Admin KPIs":
         """, unsafe_allow_html=True)
     
     st.markdown("---")
-
+    
 # ============================================================================
 # PAGE: CLASS REPORT
 # ============================================================================
@@ -1384,11 +1508,11 @@ elif st.session_state.page == "Class Report":
         </div>
         """, unsafe_allow_html=True)
     
-
+ 
     
     st.markdown("#### Prediction Review & Error Analysis")
     
-    history = load_history()
+    history = load_history(st.session_state.user_id)
     
     if not history.empty:
         # Recent predictions table
